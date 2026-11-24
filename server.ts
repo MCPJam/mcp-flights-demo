@@ -46,8 +46,7 @@ const gate = requireBearerAuth({
   },
 });
 const handler = demo.handler;
-const timer = setInterval(() => void demo.tick().catch(console.error), 10_000);
-timer.unref();
+
 const mcp = toNodeHandler({
   async fetch(request) {
     const authInfo = await gate(request);
@@ -66,7 +65,7 @@ const http = createServer((req, res) => {
       JSON.stringify({
         ok: true,
         sdk: "official-events-PR-3209",
-        events: ["demo.ping", "timer.tick"],
+        events: ["flight.status_changed"],
       }),
     );
     return;
@@ -85,7 +84,7 @@ http.listen(port, "127.0.0.1", () => {
   });
 });
 async function shutdown() {
-  clearInterval(timer);
+  await demo.stop();
   await handler.close();
   http.closeAllConnections();
   http.close();

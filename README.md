@@ -1,168 +1,133 @@
-# MCP Events Demo
+# MCPJam Flights
 
-A real MCP Events publisher, built with the **official TypeScript SDK**, that you can connect to MCPJam or another compatible client.
+**“Show my flight MJ204, and let me know if it’s cancelled or delayed.”**
 
-**[Try the hosted demo](https://mcp-events.mcpjam.com)** · [Official SDK Events PR](https://github.com/modelcontextprotocol/typescript-sdk/pull/3209)
+A shareable travel-plugin demo with fictional flights, real MCP Events, and an interactive MCP App. Built using the official TypeScript SDK's experimental Events implementation and the published MCP Apps SDK.
 
-Hosted MCP endpoint: **`https://mcp-events.mcpjam.com/mcp`**. Create a session on the home page to get its Authorization header.
+**[Open the demo](https://flights.mcpjam.com)** · MCP endpoint: **`https://flights.mcpjam.com/mcp`**
 
-## Try it in MCPJam
+## Demo in 60 seconds
 
-1. Open the hosted demo and click **Create session**.
-2. Add an **HTTP** server in MCPJam with the URL shown on the page.
-3. Add a custom header named **Authorization** and paste the entire value shown, including `Bearer`. No OAuth login is needed.
-4. In Events, subscribe to **`timer.tick`**. A heartbeat arrives about every 10 seconds.
-5. For manual delivery, subscribe to **`demo.ping`**, then call **`emit_ping`** from Tools:
+1. Open the demo and click **Create demo session**. Each visitor has an isolated, 30-minute session.
+2. In MCPJam, add an HTTP server using the endpoint above. Add the custom **Authorization** header shown on the demo page, including `Bearer`. This demo uses a custom header, not OAuth.
+3. In an MCP Apps-compatible conversation, ask **“Show my flight MJ204.”** The `get_flight` tool opens the flight card.
+4. In **Events**, subscribe to `flight.status_changed` with `{"flightId":"MJ204"}`. Choose a delivery mode supported by the selected host.
+5. Create an enabled agent trigger for that subscription: **“Let me know if MJ204 is cancelled or delayed. Include the new departure time for delays. Do not simulate changes or rebook.”**
+6. On the demo page, click **Delay 45 min**, **Delay 2 hours**, or **Cancel flight**. Check the received event and trigger run in MCPJam. **Reset to on time** lets you repeat the story.
+
+Hosts that can create subscriptions and triggers conversationally may support the full request in one message. **This publisher cannot make that promise for every host.** Reading the flight or displaying its App does not create a watch. Successful publication, receipt by the host, and an agent reply are separate observations. No real flights, reservations, purchases, or rebooking are involved.
+
+## What the plugin exposes
+
+| Interface | Purpose |
+| --- | --- |
+| `list_flights` tool | Find the fictional flights in this session: MJ204 (SFO → JFK), MJ318 (LAX → SEA) |
+| `get_flight` tool | Read current status and render the MCP App |
+| `simulate_flight_update` tool | Presenter/test-only tool; must not be used to fulfill a monitoring request |
+| `flight.status_changed` event | Deliver status changes for one selected flight |
+| `ui://mcpjam-flights/trip.html` resource | Bundled MCP App using the official Apps SDK |
+
+Example subscription arguments:
 
 ```json
-{ "message": "Hello MCPJam!", "topic": "demo" }
+{ "flightId": "MJ204" }
 ```
 
-Both event types support **webhook, polling, and streaming (push)**. The optional `topic` subscription argument filters `demo.ping` events. Enable the desired delivery mode in your MCPJam client/host settings.
+By default, only **delayed** and **cancelled** changes match. To receive recovery events too:
 
-Each visitor gets an isolated **30-minute session**. Keep its token private: anyone holding it can access that session. When it expires, subscriptions stop and stored session data is removed. Create another session to continue. Use synthetic test messages only.
+```json
+{ "flightId": "MJ204", "statuses": ["delayed", "cancelled", "on_time"] }
+```
 
-An agent can call `emit_ping` just like any other MCP tool. Whether that agent automatically consumes or reacts to the event depends on the client's integration; this demo does not establish Events support across every MCPJam Playground, eval, swarm, or user-testing surface.
+Each event contains `flight` (including scheduled/estimated times and revision), `previousStatus`, and `message`. All times on the wire are ISO UTC; the interface renders airport-local time. Delay minutes are relative to the **scheduled** departure, not cumulative. An identical update does not publish a duplicate. Updates for another flight or session do not match the watch.
 
-## Official SDK version
+The App refreshes status through `get_flight` every five seconds while visible. It uses the host's authenticated tool connection and needs no direct network access or embedded credentials. **App refresh is not MCP Events delivery.** The host receives MCP Events separately and runs the agent according to its trigger configuration.
 
-The source is pinned as a git submodule to:
+The presenter page uses authenticated `GET /demo/flight` and `POST /demo/flight`. Both route to the same session as `/mcp`. Example POST body:
 
-- Repository: [`modelcontextprotocol/typescript-sdk`](https://github.com/modelcontextprotocol/typescript-sdk)
-- Branch at selection: `feature/ext-events-sep-3415`
-- Commit: `5ebb589b970bfc8f98e344e13299f8eb76ff8cd1`
-- Events implementation: [PR #3209](https://github.com/modelcontextprotocol/typescript-sdk/pull/3209), experimental and open when selected
+```json
+{ "flightId": "MJ204", "status": "delayed", "delayMinutes": 45 }
+```
 
-This is **not a stable npm release of Events support**. The server speaks MCP `2026-07-28` and advertises `capabilities.extensions["io.modelcontextprotocol/events"]`. It does not emulate the older top-level `capabilities.events` draft.
+For `cancelled` or `on_time`, omit `delayMinutes`.
 
-`demo.ts` uses the official `EventsExtension`, `registerEvent`, `emit`, and `createMcpHandler` APIs. The SDK handles protocol messages, subscription validation, callback verification, signatures, leases, and delivery retries. Cloudflare supplies the HTTP sender, persistent subscription storage, and scheduling through the SDK's extension points.
+## SDK provenance
 
-## Run locally
+The official TypeScript SDK is a git submodule pinned to `5ebb589b970bfc8f98e344e13299f8eb76ff8cd1` from [`feature/ext-events-sep-3415`, PR #3209](https://github.com/modelcontextprotocol/typescript-sdk/pull/3209). This is experimental Events support, **not a stable npm Events release**. The server uses MCP `2026-07-28` and `capabilities.extensions["io.modelcontextprotocol/events"]`; it does not emulate the older top-level `capabilities.events` draft.
 
-Requirements: Node 24 and pnpm 10.26.1.
+The SDK handles discovery, subscriptions, poll/push/webhook delivery, callback verification, signatures, leases, and retries. The UI uses published `@modelcontextprotocol/ext-apps` (exact version in `flight-app/package-lock.json`). No application code reimplements either wire protocol.
+
+## Local development
+
+Requirements: Node 24, pnpm 10.26.1.
 
 ```sh
-git clone --recurse-submodules https://github.com/MCPJam/mcp-events-demo.git
-cd mcp-events-demo
-nvm use
+git clone --recurse-submodules https://github.com/MCPJam/mcp-flights-demo.git
+cd mcp-flights-demo
 npm run setup
-npm start
+npm --prefix cloudflare ci
 ```
 
-The setup script installs the SDK's locked workspace dependencies, builds its server/client/Node packages, and links them into the demo. Do not run a separate `npm install` in the root.
+The setup script builds the pinned SDK, links its dependencies at the root, and installs/builds the App in its own package. **Do not run `npm install` at the root.**
 
-Connect to `http://127.0.0.1:18889/mcp`. On first start, the Node server generates `.demo-token` (gitignored, mode 0600). Set the custom HTTP header:
+For the presenter website and isolated sessions, create `cloudflare/.dev.vars` (gitignored) with a local random secret of at least 32 characters:
 
 ```text
-Authorization: Bearer <contents of .demo-token>
+DEMO_SESSION_SECRET=your-random-local-secret-at-least-32-characters
 ```
 
-The local Node version has a single test principal and in-memory subscriptions. It uses the SDK's `nodeWebhookSender`. The hosted version uses isolated sessions and Durable Object storage. Both use the same event definitions in `demo.ts`.
+Then `npm --prefix cloudflare run dev` and visit `http://localhost:18891`.
 
-Local configuration:
+For MCP-only local testing, run `npm start`. Connect to `http://127.0.0.1:18889/mcp` with `Authorization: Bearer <contents of .demo-token>`. The token is generated on first start, gitignored, and mode 0600. The Node server has one in-memory test session; the presenter page is served by the Cloudflare runtime.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `PORT` | `18889` | Node server port |
-| `DEMO_TOKEN` | `.demo-token` contents | Override the local bearer credential |
-| `EVENTS_RECEIVER_PORT` | `18890` | Smoke-test receiver; set on both Node server and test if changing it |
-| `WEBHOOK_URL` | Local receiver URL | Public HTTPS receiver URL for remote tests |
+| `PORT` | `18889` | Local Node server |
+| `DEMO_TOKEN` | `.demo-token` contents | Override local bearer credential |
+| `EVENTS_RECEIVER_PORT` | `18890` | Set on both Node server and smoke test |
+| `WEBHOOK_URL` | Local test receiver | Public HTTPS callback for hosted tests |
 
-For temporary remote access to the local Node server, install `cloudflared` and run `npm run tunnel`. This is separate from the permanent Workers deployment.
+After editing `flight-app/src.ts` or `index.html`, run `npm --prefix flight-app run build`.
 
-## Deploy your own Cloudflare copy
+## Cloudflare deployment
 
-The hosted version uses a Worker and one SQLite-backed Durable Object per session. You need a Cloudflare account with Workers and Durable Objects available.
-
-```sh
-# After npm run setup:
-npm --prefix cloudflare ci
-cd cloudflare
-npx wrangler login
-```
-
-Choose a unique Worker `name` in `cloudflare/wrangler.jsonc`. Remove the `routes` entry for MCPJam's domain, or replace it with a domain in your own Cloudflare account. Change the two rate-limit namespace IDs if those IDs already exist in your account. The config does not contain an account ID or production secrets.
+Each session runs in its own SQLite-backed Durable Object. Flight state and webhook subscriptions survive runtime restarts. An alarm terminates subscriptions and deletes session storage at expiry. Tokens are signed, expire after 30 minutes, and should not be shared. Only use synthetic data.
 
 ```sh
-npx wrangler deploy
-npx wrangler secret put DEMO_SESSION_SECRET
+npm --prefix cloudflare run deploy
+# From cloudflare/: npx wrangler secret put DEMO_SESSION_SECRET
 ```
 
-At the secret prompt, paste a fresh random secret of at least 32 characters, for example one generated with `openssl rand -hex 32`. Until this secret is configured, session creation and MCP access return `503`. Rotating it invalidates existing session tokens.
+Set a fresh production secret via Wrangler's secret prompt. Do not reuse your local secret or commit credentials. If forking, change the Worker name, custom domain, rate-limit namespace IDs, source link, and workflow production URL. Until the secret is configured, session creation and protected endpoints return 503.
 
-Wrangler prints your `workers.dev` address and any configured custom domain. MCPJam's deployment uses `mcp-events.mcpjam.com`. Share the **home page**, where users create their own credentials, rather than sharing one user's token. The landing page's source link points to this repository; update it for your fork if desired.
+**Limits:** SDK event replay is in memory (256 events / five minutes) and can reset on eviction/deployment. This is not a durable event queue or an exactly-once system. Flight state is saved before publication; an interruption between those operations can leave a changed status without a delivered event. Reconnect/resubscribe as needed and use `get_flight` to reconcile current status. Session creation is limited to roughly 10/minute/IP, authenticated requests to 300/minute/session/location, and stored webhook subscriptions to 32/session. UI polling stops when its page is hidden. These are demo bounds, not a global spend cap.
 
-For local Cloudflare development, create `cloudflare/.dev.vars` with a **different** random secret:
+## CI and deployments
 
-```text
-DEMO_SESSION_SECRET=your-local-random-secret-at-least-32-characters
-```
+GitHub Actions builds both SDKs, typechecks both runtimes, runs unit checks, exercises all three delivery modes against Node, and tests the authenticated presenter-to-event path in the local Cloudflare runtime.
 
-Then run `npm --prefix cloudflare run dev` and visit `http://localhost:18891`. Never commit `.dev.vars` or share the session-signing secret.
+The production deployment job runs only after a verified push to `main`. Configure the repository's `production` environment with `CLOUDFLARE_API_TOKEN` (Workers deployment and domain route permissions) and variable `CLOUDFLARE_ACCOUNT_ID`. Restrict that environment to `main`, then set the repository variable `CLOUDFLARE_DEPLOY_ENABLED=true` to enable automatic deployments. The runtime session secret stays in Cloudflare. Pull requests do not deploy. A newly created repo needs its own deployment credentials; it does not inherit the original Events demo's secrets.
 
-## Automatic deployments
-
-GitHub Actions runs the verification suite on pushes and pull requests. After a push to `main` passes verification, the `Deploy Cloudflare production` job builds and deploys that exact commit, then checks the live endpoint and session isolation. Pull requests and other branches do not deploy. Production deployments are serialized so an in-progress deployment is not cancelled halfway through.
-
-The repository's `production` environment is restricted to the `main` branch. It needs:
-
-- Environment secret `CLOUDFLARE_API_TOKEN`: a dedicated deployment token, scoped to the target Cloudflare account and custom-domain zone, with the permissions required to deploy Workers and maintain their routes.
-- Environment variable `CLOUDFLARE_ACCOUNT_ID`: the target account ID.
-
-The Worker's `DEMO_SESSION_SECRET` remains in Cloudflare; CI does not generate, read, or rotate it. GitHub's pull-request approval requirement still applies before changes can merge to `main`.
-
-For forks, configure these environment values and change the production URL in the workflow to your own hostname before enabling deployments.
-
-## Architecture and limits
-
-- `demo.ts`: shared event catalog and manual emission tool, using the official SDK.
-- `server.ts`: local Node HTTP server and SDK Node webhook sender.
-- `cloudflare/src/index.ts`: session creation, validation, rate limiting, Durable Object routing, webhook storage, and alarms.
-- `cloudflare/src/webhook-sender.ts`: Workers `fetch` adapter; HTTPS only, no redirects, five-second timeout, 64 KiB response cap. Cloudflare's public outbound network enforces private-destination restrictions. No private networking bindings are configured.
-- `cloudflare/src/landing.ts`: self-service connection instructions; no account or shared credential required.
-
-Hosted sessions use signed, expiring bearer tokens. The session ID routes all requests to the same Durable Object. Webhook subscription records (including signing secrets) live in that object's storage. An alarm emits the heartbeat roughly every 10 seconds, even without incoming HTTP requests, and terminates subscriptions and deletes storage at session expiry.
-
-**Demo durability:** the event replay buffer and manual sequence counter are in memory and may reset after runtime eviction or deployment. Webhook records survive those restarts until session expiry, but this is not a durable event queue or an exactly-once delivery system. Alarm retries reuse an event ID where possible; consumers should deduplicate by event ID.
-
-The hosted replay buffer holds at most 256 events / five minutes per event type. SDK subscription quotas and a stored-webhook cap bound each session. Session creation is limited to approximately 10/minute per IP and MCP requests to 300/minute per session, per Cloudflare location. These are demo safeguards, not a global spending cap. Active sessions use Durable Object requests, storage, and duration; normal Cloudflare usage charges apply. Worker invocation logging is disabled to avoid collecting demo traffic by default.
-
-## Tests
+## Verification
 
 ```sh
 npm run typecheck
 npm --prefix cloudflare run check
 npm run test:unit
 npm --prefix cloudflare run build
-
-# With the local Node server running:
-npm test
-
-# With the local Cloudflare server running:
-npm run test:isolation
+npm test               # Node server running
+npm run test:isolation # Local Cloudflare server running
 ```
 
-The official SDK client checks discovery, manual event delivery via **all three modes**, topic filtering, timer delivery, and cancellation. Additional checks cover session separation, missing/forged credentials, expiration/signature validation, and the Cloudflare sender's transport boundaries.
-
-To test all modes against a hosted server, expose the smoke-test receiver from your machine:
+To test all delivery modes against a hosted endpoint, expose the receiver with `cloudflared tunnel --url http://127.0.0.1:18890`, then run:
 
 ```sh
-cloudflared tunnel --url http://127.0.0.1:18890
+WEBHOOK_URL=https://YOUR-TUNNEL.trycloudflare.com/events npm run test:cloudflare -- https://flights.mcpjam.com/mcp
+npm run test:isolation -- https://flights.mcpjam.com/mcp
 ```
 
-In another terminal, use that tunnel's HTTPS URL:
-
-```sh
-WEBHOOK_URL=https://YOUR-RECEIVER.trycloudflare.com/events \
-  npm run test:cloudflare -- https://YOUR-DEMO.workers.dev/mcp
-
-npm run test:isolation -- https://YOUR-DEMO.workers.dev/mcp
-```
-
-The test creates its own 30-minute hosted session. Its receiver is started before subscribing and closed when the test finishes. Stop the receiver tunnel afterward. Hosted senders cannot call your machine's localhost directly.
-
-GitHub Actions builds the pinned SDK, typechecks both runtimes, runs unit checks, tests all three modes against Node, and checks isolation in the local Cloudflare runtime. Public callback delivery is verified separately against the live deployment.
+These create disposable sessions; they do not configure or prove a live MCPJam agent trigger. Close the test tunnel afterward.
 
 ## License
 
-Demo code: MIT. The official SDK submodule retains its Apache-2.0 license.
+Demo: MIT. Based on [MCPJam's Events demo](https://github.com/MCPJam/mcp-events-demo). The official SDK submodule retains its Apache-2.0 license.

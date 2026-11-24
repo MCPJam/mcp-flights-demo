@@ -46,12 +46,12 @@ jobs:
   deploy:
     name: Deploy Cloudflare production
     needs: verify
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CLOUDFLARE_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
       name: production
-      url: https://mcp-events.mcpjam.com
+      url: https://flights.mcpjam.com
     concurrency:
       group: cloudflare-production
       cancel-in-progress: false
@@ -96,5 +96,5 @@ jobs:
       - name: Verify the deployed endpoint
         if: steps.current.outputs.deploy == 'true'
         run: |
-          curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 3 --max-time 15 https://mcp-events.mcpjam.com/health
-          npm run test:isolation -- https://mcp-events.mcpjam.com/mcp
+          curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 3 --max-time 15 https://flights.mcpjam.com/health
+          npm run test:isolation -- https://flights.mcpjam.com/mcp

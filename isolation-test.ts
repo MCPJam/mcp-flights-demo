@@ -55,22 +55,83 @@ try {
   const a = await connect();
   const b = await connect();
   assert.notEqual(a.token, b.token);
+  const endpoint = new URL("/demo/flight", url);
+  assert.equal((await fetch(endpoint)).status, 401);
+  const headers = (token: string) => ({
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  });
+  const post = (token: string, data: unknown) =>
+    fetch(endpoint, {
+      method: "POST",
+      headers: headers(token),
+      body: JSON.stringify(data),
+    });
   for (const session of [a, b])
     subscriptions.push(
-      await session.events.subscribe({ name: "demo.ping", delivery: "poll" }),
+      await session.events.subscribe({
+        name: "flight.status_changed",
+        delivery: "poll",
+        arguments: { flightId: "MJ204" },
+      }),
     );
-  await a.client.callTool({
-    name: "emit_ping",
-    arguments: { message: "Only A" },
+  assert.equal(
+    (
+      await post(a.token, {
+        flightId: "MJ204",
+        status: "delayed",
+        delayMinutes: 0,
+      })
+    ).status,
+    400,
+  );
+  const invalid = await fetch(endpoint, {
+    method: "POST",
+    headers: headers(a.token),
+    body: "{",
   });
-  assert.equal((await first(subscriptions[0])).data.message, "Only A");
-  await b.client.callTool({
-    name: "emit_ping",
-    arguments: { message: "Only B" },
+  assert.equal(invalid.status, 400);
+  assert.equal(
+    (
+      await post(a.token, {
+        flightId: "MJ204",
+        status: "delayed",
+        delayMinutes: 45,
+      })
+    ).status,
+    200,
+  );
+  assert.equal(
+    (
+      (await first(subscriptions[0])).data as {
+        flight: { delayMinutes: number };
+      }
+    ).flight.delayMinutes,
+    45,
+  );
+  const bState = (await fetch(endpoint, { headers: headers(b.token) }).then(
+    (r) => r.json(),
+  )) as { flights: Array<{ status: string }> };
+  assert.equal(bState.flights[0].status, "on_time");
+  assert.equal(
+    (await post(b.token, { flightId: "MJ204", status: "cancelled" })).status,
+    200,
+  );
+  assert.equal(
+    ((await first(subscriptions[1])).data as { flight: { status: string } })
+      .flight.status,
+    "cancelled",
+  );
+  const aState = await a.client.callTool({
+    name: "get_flight",
+    arguments: { flightId: "MJ204" },
   });
-  assert.equal((await first(subscriptions[1])).data.message, "Only B");
+  assert.equal(
+    (aState.structuredContent as { flight: { status: string } }).flight.status,
+    "delayed",
+  );
   console.log(
-    "PASS: missing/forged credentials rejected; two sessions cannot receive each other’s events",
+    "PASS: auth rejection, invalid updates, isolated flight state, presenter REST → MCP Event → tool readback",
   );
 } finally {
   await Promise.allSettled(subscriptions.map((sub) => sub.cancel()));

@@ -1,0 +1,15 @@
+{
+  "name": "mcpjam-flight-app",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "2.0.4"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

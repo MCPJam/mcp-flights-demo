@@ -7,4 +7,6 @@ pnpm --dir vendor/typescript-sdk --filter '@modelcontextprotocol/server...' --fi
 if [[ ! -e node_modules ]]; then
   ln -s vendor/typescript-sdk/node_modules node_modules
 fi
+npm --prefix flight-app ci
+npm --prefix flight-app run build
 echo 'Ready. Run npm start, then npm test in a second terminal.'

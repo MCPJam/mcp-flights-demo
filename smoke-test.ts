@@ -55,51 +55,93 @@ try {
   const { events: types } = await events.list();
   assert.deepEqual(
     types.map((type) => [type.name, type.delivery]),
-    [
-      ["demo.ping", ["poll", "push", "webhook"]],
-      ["timer.tick", ["poll", "push", "webhook"]],
-    ],
+    [["flight.status_changed", ["poll", "push", "webhook"]]],
   );
-  console.log(
-    "PASS: official SDK discovery lists both events and all three delivery modes",
+  const tools = await client.listTools();
+  const view = tools.tools.find((tool) => tool.name === "get_flight");
+  assert.equal(
+    (view?._meta?.ui as { resourceUri: string }).resourceUri,
+    "ui://mcpjam-flights/trip.html",
   );
-  const topic = `smoke-${randomUUID()}`;
+  const resource = await client.readResource({
+    uri: "ui://mcpjam-flights/trip.html",
+  });
+  assert.equal(resource.contents[0].mimeType, "text/html;profile=mcp-app");
+  assert.ok(
+    "text" in resource.contents[0] &&
+      resource.contents[0].text.includes("Your flight"),
+  );
+  await client.callTool({
+    name: "simulate_flight_update",
+    arguments: { flightId: "MJ204", status: "on_time" },
+  });
   for (const delivery of ["poll", "push", "webhook"] as const) {
-    const sub = await events.subscribe({
-      name: "demo.ping",
-      delivery,
-      arguments: { topic },
-    });
-    subscriptions.push(sub);
-  }
-  // A nonmatching event must not be delivered to the filtered subscriptions.
-  await client.callTool({
-    name: "emit_ping",
-    arguments: { message: "Ignore me", topic: "not-the-test-topic" },
-  });
-  await client.callTool({
-    name: "emit_ping",
-    arguments: { message: "E2E works", topic },
-  });
-  const received = await Promise.all(subscriptions.map(firstEvent));
-  for (let i = 0; i < subscriptions.length; i++) {
-    assert.equal(received[i].name, "demo.ping");
-    assert.equal(received[i].data.message, "E2E works");
-    assert.equal(received[i].data.topic, topic);
-    assert.equal(received[i].eventId, received[0].eventId);
-    console.log(
-      `PASS: ${subscriptions[i].deliveryMode} delivered the same emitted event with topic filtering`,
+    subscriptions.push(
+      await events.subscribe({
+        name: "flight.status_changed",
+        delivery,
+        arguments: { flightId: "MJ204" },
+      }),
     );
   }
-  const heartbeat = await events.subscribe({
-    name: "timer.tick",
-    delivery: "poll",
+  const iterators = subscriptions.map((sub) => sub[Symbol.asyncIterator]());
+  // Another flight must not wake any of the MJ204 subscriptions.
+  await client.callTool({
+    name: "simulate_flight_update",
+    arguments: { flightId: "MJ318", status: "delayed", delayMinutes: 15 },
   });
-  subscriptions.push(heartbeat);
-  const beat = await firstEvent(heartbeat);
-  assert.equal(beat.name, "timer.tick");
-  assert.ok(Number.isInteger(beat.data.tick));
-  console.log("PASS: automatic timer event delivered");
+  await client.callTool({
+    name: "simulate_flight_update",
+    arguments: { flightId: "MJ204", status: "delayed", delayMinutes: 45 },
+  });
+  const received = await Promise.all(
+    iterators.map((iterator) => iterator.next()),
+  );
+  for (const item of received) {
+    assert.equal(item.value.data.flight.flightId, "MJ204");
+    assert.equal(item.value.data.flight.status, "delayed");
+    assert.equal(item.value.data.flight.delayMinutes, 45);
+    assert.equal(item.value.eventId, received[0].value.eventId);
+  }
+  const duplicate = await client.callTool({
+    name: "simulate_flight_update",
+    arguments: { flightId: "MJ204", status: "delayed", delayMinutes: 45 },
+  });
+  assert.equal(
+    (duplicate.structuredContent as { emitted: boolean })?.emitted,
+    false,
+  );
+  // Default watch ignores reset; the next event must be cancellation.
+  await client.callTool({
+    name: "simulate_flight_update",
+    arguments: { flightId: "MJ204", status: "on_time" },
+  });
+  await client.callTool({
+    name: "simulate_flight_update",
+    arguments: { flightId: "MJ204", status: "cancelled" },
+  });
+  for (const item of await Promise.all(
+    iterators.map((iterator) => iterator.next()),
+  )) {
+    assert.equal(item.value.data.flight.status, "cancelled");
+    assert.equal(item.value.data.flight.estimatedDeparture, null);
+  }
+  const flight = await client.callTool({
+    name: "get_flight",
+    arguments: { flightId: "MJ204" },
+  });
+  assert.equal(
+    (flight.structuredContent as { flight: { status: string } }).flight.status,
+    "cancelled",
+  );
+  const invalid = await client.callTool({
+    name: "simulate_flight_update",
+    arguments: { flightId: "MJ204", status: "delayed" },
+  });
+  assert.equal(invalid.isError, true);
+  console.log(
+    "PASS: discovery + App resource; poll/push/webhook delay and cancellation delivery; flight filtering; reset exclusion; duplicate suppression; validation",
+  );
 } finally {
   await Promise.allSettled(subscriptions.map((sub) => sub.cancel()));
   await client.close();

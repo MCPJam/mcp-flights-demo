@@ -8,6 +8,8 @@ import { createDemo } from "../../demo";
 import { createSessionToken, verifySessionToken } from "./session-token";
 import { cloudflareWebhookSender } from "./webhook-sender";
 import { landing } from "./landing";
+import type { Flight } from "../../flights";
+import { changeSchema } from "../../flights";
 
 interface Env {
   SESSIONS: DurableObjectNamespace<EventsDemoSession>;
@@ -15,7 +17,6 @@ interface Env {
   REQUEST_LIMIT: RateLimit;
   DEMO_SESSION_SECRET: string;
 }
-const TICK_MS = 10_000;
 
 class SubscriptionStore implements WebhookSubscriptionStore {
   constructor(private storage: DurableObjectStorage) {}
@@ -52,16 +53,22 @@ export class EventsDemoSession extends DurableObject<Env> {
   private expiresAt = 0;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.demo = createDemo({
-      getPrincipal: () => ctx.id.toString(),
-      webhookSender: cloudflareWebhookSender,
-      webhookStore: new SubscriptionStore(ctx.storage),
-      webhookTtlMs: 60_000,
-      maxSubscriptions: 128,
-      emitBuffer: { maxEvents: 256, maxAgeMs: 5 * 60_000 },
-      defaultNextPollMs: 1000,
-      checkIntervalMs: 1000,
-    });
+    this.demo = createDemo(
+      {
+        getPrincipal: () => ctx.id.toString(),
+        webhookSender: cloudflareWebhookSender,
+        webhookStore: new SubscriptionStore(ctx.storage),
+        webhookTtlMs: 60_000,
+        maxSubscriptions: 128,
+        emitBuffer: { maxEvents: 256, maxAgeMs: 5 * 60_000 },
+        defaultNextPollMs: 1000,
+        checkIntervalMs: 1000,
+      },
+      {
+        load: () => ctx.storage.get<Flight[]>("flights"),
+        save: (flights) => ctx.storage.put("flights", flights),
+      },
+    );
     ctx.blockConcurrencyWhile(async () => {
       this.expiresAt = (await ctx.storage.get<number>("expiresAt")) ?? 0;
     });
@@ -72,12 +79,34 @@ export class EventsDemoSession extends DurableObject<Env> {
       if (!Number.isFinite(this.expiresAt) || this.expiresAt <= Date.now())
         return new Response("Expired session", { status: 401 });
       await this.ctx.storage.put("expiresAt", this.expiresAt);
-      await this.ctx.storage.setAlarm(
-        Math.min(Date.now() + TICK_MS, this.expiresAt),
-      );
+      await this.ctx.storage.setAlarm(this.expiresAt);
     }
     if (Date.now() >= this.expiresAt)
       return new Response("Expired session", { status: 401 });
+    if (new URL(request.url).pathname === "/demo/flight") {
+      if (request.method === "GET")
+        return Response.json({ flights: await this.demo.listFlights() });
+      if (request.method !== "POST")
+        return new Response("Use GET or POST", { status: 405 });
+      if (Number(request.headers.get("content-length") ?? 0) > 4096)
+        return new Response("Request too large", { status: 413 });
+      try {
+        const body = await request.text();
+        if (body.length > 4096)
+          return new Response("Request too large", { status: 413 });
+        const parsed = changeSchema.safeParse(JSON.parse(body));
+        if (!parsed.success)
+          return new Response("Invalid flight update", { status: 400 });
+        return Response.json(await this.demo.simulate(parsed.data));
+      } catch (error) {
+        if (error instanceof SyntaxError)
+          return new Response("Invalid JSON", { status: 400 });
+        return new Response(
+          "Could not publish flight update. Refresh status before retrying.",
+          { status: 500 },
+        );
+      }
+    }
     return this.demo.handler.fetch(request);
   }
   async alarm() {
@@ -88,15 +117,7 @@ export class EventsDemoSession extends DurableObject<Env> {
       await this.ctx.storage.deleteAlarm();
       return;
     }
-    // Stable ID across alarm retries. Persist the next tick before performing delivery.
-    const scheduledAt =
-      (await this.ctx.storage.get<number>("nextTick")) ??
-      Math.floor(Date.now() / TICK_MS) * TICK_MS;
-    await this.ctx.storage.setAlarm(
-      Math.min(Date.now() + TICK_MS, this.expiresAt),
-    );
-    await this.demo.tick(scheduledAt);
-    await this.ctx.storage.put("nextTick", scheduledAt + TICK_MS);
+    await this.ctx.storage.setAlarm(this.expiresAt);
   }
 }
 
@@ -133,7 +154,11 @@ export default {
           sdkCommit: "5ebb589b970bfc8f98e344e13299f8eb76ff8cd1",
         }),
       );
-    if (pathname !== "/sessions" && pathname !== "/mcp")
+    if (
+      pathname !== "/sessions" &&
+      pathname !== "/mcp" &&
+      pathname !== "/demo/flight"
+    )
       return new Response("Not found", { status: 404 });
     if (!env.DEMO_SESSION_SECRET || env.DEMO_SESSION_SECRET.length < 32)
       return cors(new Response("Demo is not configured", { status: 503 }));
