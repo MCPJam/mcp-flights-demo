@@ -31,7 +31,7 @@ jobs:
             sleep 1
           done
           npm test
-      - name: Cloudflare session isolation
+      - name: Cloudflare anonymous trip isolation
         run: |
           node -e "require('fs').writeFileSync('cloudflare/.dev.vars','DEMO_SESSION_SECRET='+require('crypto').randomBytes(32).toString('hex'))"
           npm --prefix cloudflare run dev >worker.log 2>&1 &

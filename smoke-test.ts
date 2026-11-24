@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { randomUUID } from "node:crypto";
 import {
   Client,
   StreamableHTTPClientTransport,
@@ -10,18 +9,9 @@ import {
   type EventSubscription,
 } from "@modelcontextprotocol/client/ext/events";
 import { toNodeHandler } from "@modelcontextprotocol/node";
-import { getToken, port, receiverPort } from "./config.js";
+import { port, receiverPort } from "./config.js";
 
 const url = process.argv[2] ?? `http://127.0.0.1:${port}/mcp`;
-const session =
-  process.env.CREATE_SESSION === "1"
-    ? await fetch(new URL("/sessions", url), { method: "POST" }).then(
-        async (response) => {
-          assert.equal(response.status, 200, "Create hosted demo session");
-          return (await response.json()) as { token: string };
-        },
-      )
-    : undefined;
 const events = new EventsClientExtension({
   webhook: {
     url: process.env.WEBHOOK_URL ?? `http://127.0.0.1:${receiverPort}/events`,
@@ -42,16 +32,8 @@ const timeout = setTimeout(() => {
   process.exit(1);
 }, 45_000);
 const subscriptions: EventSubscription[] = [];
-async function firstEvent<T>(subscription: EventSubscription<T>) {
-  for await (const event of subscription) return event;
-  throw new Error("Subscription ended before receiving an event");
-}
 try {
-  await client.connect(
-    new StreamableHTTPClientTransport(new URL(url), {
-      authProvider: { token: async () => session?.token ?? getToken() },
-    }),
-  );
+  await client.connect(new StreamableHTTPClientTransport(new URL(url)));
   const { events: types } = await events.list();
   assert.deepEqual(
     types.map((type) => [type.name, type.delivery]),
@@ -71,16 +53,26 @@ try {
     "text" in resource.contents[0] &&
       resource.contents[0].text.includes("Your flight"),
   );
+  const created = await client.callTool({
+    name: "create_demo_trip",
+    arguments: {},
+  });
+  assert.equal(created.isError, undefined);
+  const { tripId, expiresAt } = created.structuredContent as {
+    tripId: string;
+    expiresAt: number;
+  };
+  assert.ok(tripId && expiresAt > Date.now());
   await client.callTool({
     name: "simulate_flight_update",
-    arguments: { flightId: "MJ204", status: "on_time" },
+    arguments: { tripId, flightId: "MJ204", status: "on_time" },
   });
   for (const delivery of ["poll", "push", "webhook"] as const) {
     subscriptions.push(
       await events.subscribe({
         name: "flight.status_changed",
         delivery,
-        arguments: { flightId: "MJ204" },
+        arguments: { tripId, flightId: "MJ204" },
       }),
     );
   }
@@ -88,16 +80,27 @@ try {
   // Another flight must not wake any of the MJ204 subscriptions.
   await client.callTool({
     name: "simulate_flight_update",
-    arguments: { flightId: "MJ318", status: "delayed", delayMinutes: 15 },
+    arguments: {
+      tripId,
+      flightId: "MJ318",
+      status: "delayed",
+      delayMinutes: 15,
+    },
   });
   await client.callTool({
     name: "simulate_flight_update",
-    arguments: { flightId: "MJ204", status: "delayed", delayMinutes: 45 },
+    arguments: {
+      tripId,
+      flightId: "MJ204",
+      status: "delayed",
+      delayMinutes: 45,
+    },
   });
   const received = await Promise.all(
     iterators.map((iterator) => iterator.next()),
   );
   for (const item of received) {
+    assert.equal(item.value.data.tripId, tripId);
     assert.equal(item.value.data.flight.flightId, "MJ204");
     assert.equal(item.value.data.flight.status, "delayed");
     assert.equal(item.value.data.flight.delayMinutes, 45);
@@ -105,7 +108,12 @@ try {
   }
   const duplicate = await client.callTool({
     name: "simulate_flight_update",
-    arguments: { flightId: "MJ204", status: "delayed", delayMinutes: 45 },
+    arguments: {
+      tripId,
+      flightId: "MJ204",
+      status: "delayed",
+      delayMinutes: 45,
+    },
   });
   assert.equal(
     (duplicate.structuredContent as { emitted: boolean })?.emitted,
@@ -114,11 +122,11 @@ try {
   // Default watch ignores reset; the next event must be cancellation.
   await client.callTool({
     name: "simulate_flight_update",
-    arguments: { flightId: "MJ204", status: "on_time" },
+    arguments: { tripId, flightId: "MJ204", status: "on_time" },
   });
   await client.callTool({
     name: "simulate_flight_update",
-    arguments: { flightId: "MJ204", status: "cancelled" },
+    arguments: { tripId, flightId: "MJ204", status: "cancelled" },
   });
   for (const item of await Promise.all(
     iterators.map((iterator) => iterator.next()),
@@ -128,7 +136,7 @@ try {
   }
   const flight = await client.callTool({
     name: "get_flight",
-    arguments: { flightId: "MJ204" },
+    arguments: { tripId, flightId: "MJ204" },
   });
   assert.equal(
     (flight.structuredContent as { flight: { status: string } }).flight.status,
@@ -136,11 +144,11 @@ try {
   );
   const invalid = await client.callTool({
     name: "simulate_flight_update",
-    arguments: { flightId: "MJ204", status: "delayed" },
+    arguments: { tripId, flightId: "MJ204", status: "delayed" },
   });
   assert.equal(invalid.isError, true);
   console.log(
-    "PASS: discovery + App resource; poll/push/webhook delay and cancellation delivery; flight filtering; reset exclusion; duplicate suppression; validation",
+    "PASS: anonymous discovery + trip creation + App resource; poll/push/webhook delay and cancellation delivery; flight filtering; reset exclusion; duplicate suppression; validation",
   );
 } finally {
   await Promise.allSettled(subscriptions.map((sub) => sub.cancel()));

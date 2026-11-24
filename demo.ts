@@ -19,8 +19,36 @@ import {
 import { flightAppHtml } from "./flight-app/dist/html.js";
 
 export const APP_URI = "ui://mcpjam-flights/trip.html";
+export interface DemoTrip {
+  tripId: string;
+  expiresAt: number;
+}
+export interface TripContext {
+  getTrip(): DemoTrip | undefined;
+  createTrip?: () => Promise<DemoTrip & { flight: Flight }>;
+}
+const tripIdSchema = z
+  .string()
+  .min(1)
+  .max(200)
+  .describe(
+    "The tripId returned by create_demo_trip. Reuse it for every tool call and event subscription for this trip.",
+  );
 const MIME = "text/html;profile=mcp-app";
-export function createDemo(options: EventsOptions, store?: FlightStore) {
+export function createDemo(
+  options: EventsOptions,
+  store?: FlightStore,
+  context?: TripContext,
+) {
+  const tripData = () => context?.getTrip();
+  const assertTrip = (tripId: string) => {
+    const trip = tripData();
+    if (!trip || trip.tripId !== tripId || trip.expiresAt <= Date.now())
+      throw new EventsError(
+        "forbidden",
+        "Trip is missing, invalid, or expired. Call create_demo_trip to start a new 30-minute demo.",
+      );
+  };
   const events = new EventsExtension(options);
   let flights: Flight[];
   const ready = (async () => {
@@ -31,8 +59,9 @@ export function createDemo(options: EventsOptions, store?: FlightStore) {
   const changed = events.registerEvent("flight.status_changed", {
     emitOnly: true,
     description:
-      "A simulated flight was delayed, cancelled, or restored. Subscribe for one flightId. By default only delays and cancellations are delivered. Ask the host to create an event subscription and an agent trigger; calling get_flight alone does not start monitoring.",
+      "A simulated flight was delayed, cancelled, or restored. Subscribe using the tripId from create_demo_trip and one flightId. By default only delays and cancellations are delivered. Ask the host to create an event subscription and an agent trigger; calling get_flight alone does not start monitoring.",
     inputSchema: z.object({
+      tripId: tripIdSchema,
       flightId: z.enum(flightIds),
       statuses: z
         .array(statusSchema)
@@ -43,11 +72,14 @@ export function createDemo(options: EventsOptions, store?: FlightStore) {
         ),
     }),
     payloadSchema: z.object({
+      tripId: z.string(),
       flight: flightSchema,
       previousStatus: statusSchema,
       message: z.string(),
     }),
+    onSubscribe: (_ctx, args) => assertTrip(args.tripId),
     match: (_ctx, event, args) =>
+      event.data.tripId === args.tripId &&
       event.data.flight.flightId === args.flightId &&
       (args.statuses ?? ["delayed", "cancelled"]).includes(
         event.data.flight.status,
@@ -69,7 +101,7 @@ export function createDemo(options: EventsOptions, store?: FlightStore) {
       const previous = await getFlight(change.flightId);
       const delay = change.status === "delayed" ? change.delayMinutes : 0;
       if (previous.status === change.status && previous.delayMinutes === delay)
-        return { flight: previous, emitted: false };
+        return { ...tripData(), flight: previous, emitted: false };
       const flight = applyChange(previous, change);
       const next = flights.map((f) =>
         f.flightId === flight.flightId ? flight : f,
@@ -86,19 +118,65 @@ export function createDemo(options: EventsOptions, store?: FlightStore) {
       await changed.emit({
         eventId,
         timestamp: flight.updatedAt,
-        data: { flight, previousStatus: previous.status, message },
+        data: {
+          tripId: tripData()?.tripId ?? "unit-test",
+          flight,
+          previousStatus: previous.status,
+          message,
+        },
       });
-      return { flight, emitted: true, eventId };
+      return { ...tripData(), flight, emitted: true, eventId };
     });
     queue = result.catch(() => {});
     return result;
   }
   function buildServer() {
     const server = new McpServer(
-      { name: "MCPJam Flights", version: "1.0.0" },
+      { name: "MCPJam Flights", version: "1.1.0" },
       {
         extensions: [events],
         jsonSchemaValidator: new CfWorkerJsonSchemaValidator(),
+      },
+    );
+    server.registerTool(
+      "create_demo_trip",
+      {
+        title: "Create a demo trip",
+        description:
+          "Start here when the user asks to watch a flight and has no tripId yet. Creates an isolated fictional trip, valid for 30 minutes, without login or credentials. Reuse the returned tripId in get_flight, simulate_flight_update and flight.status_changed subscription arguments. Then use your host's Events tools to subscribe and arrange alerts; creating a trip alone does not start monitoring. Do not create another trip if a valid tripId is already available.",
+        inputSchema: z.object({}),
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          openWorldHint: false,
+        },
+        _meta: { ui: { resourceUri: APP_URI }, "ui/resourceUri": APP_URI },
+      },
+      async () => {
+        if (!context?.createTrip)
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: "Use create_demo_trip on the public /mcp endpoint.",
+              },
+            ],
+          };
+        const trip = await context.createTrip();
+        const data = {
+          ...trip,
+          subscription: {
+            name: "flight.status_changed",
+            arguments: { tripId: trip.tripId, flightId: trip.flight.flightId },
+          },
+          monitoring:
+            "Not started. Subscribe with your host's Events tools and enable the user's alert instruction.",
+        };
+        return {
+          content: [{ type: "text", text: JSON.stringify(data) }],
+          structuredContent: data,
+        };
       },
     );
     server.registerTool(
@@ -106,12 +184,13 @@ export function createDemo(options: EventsOptions, store?: FlightStore) {
       {
         title: "Find your demo flight",
         description:
-          "List the fictional flights in this isolated demo session. No real bookings or passenger data.",
-        inputSchema: z.object({}),
+          "List the fictional flights in this isolated demo trip. No real bookings or passenger data.",
+        inputSchema: z.object({ tripId: tripIdSchema }),
         annotations: { readOnlyHint: true, openWorldHint: false },
       },
-      async () => {
-        const data = { flights: await listFlights() };
+      async ({ tripId }) => {
+        assertTrip(tripId);
+        const data = { ...tripData(), flights: await listFlights() };
         return {
           content: [{ type: "text", text: JSON.stringify(data) }],
           structuredContent: data,
@@ -123,13 +202,17 @@ export function createDemo(options: EventsOptions, store?: FlightStore) {
       {
         title: "View flight status",
         description:
-          "Show the live MCP App trip card for a fictional flight. This reads status; it does NOT subscribe or promise alerts. To watch it, the HOST must subscribe to flight.status_changed with this flightId and arrange agent execution. Use the user's standing instruction as the trigger, e.g. 'Let me know if my flight is cancelled or delayed.'",
-        inputSchema: z.object({ flightId: z.enum(flightIds) }),
+          "Show the live MCP App trip card for a fictional flight. This reads status; it does NOT subscribe or promise alerts. To watch it, the HOST must subscribe to flight.status_changed with this tripId and flightId and arrange agent execution. Use the user's standing instruction as the trigger, e.g. 'Let me know if my flight is cancelled or delayed.'",
+        inputSchema: z.object({
+          tripId: tripIdSchema,
+          flightId: z.enum(flightIds),
+        }),
         annotations: { readOnlyHint: true, openWorldHint: false },
         _meta: { ui: { resourceUri: APP_URI }, "ui/resourceUri": APP_URI },
       },
-      async ({ flightId }) => {
-        const data = { flight: await getFlight(flightId) };
+      async ({ tripId, flightId }) => {
+        assertTrip(tripId);
+        const data = { ...tripData(), flight: await getFlight(flightId) };
         return {
           content: [{ type: "text", text: JSON.stringify(data) }],
           structuredContent: data,
@@ -164,6 +247,7 @@ export function createDemo(options: EventsOptions, store?: FlightStore) {
         description:
           "PRESENTER/TEST TOOL ONLY. Change fictional flight status and publish an MCP Event. Never call this to check a flight, start monitoring, or fulfill an alert request. Call only when explicitly asked to simulate a delay, cancellation, or reset. delayMinutes is required only for delayed; omit otherwise.",
         inputSchema: z.object({
+          tripId: tripIdSchema,
           flightId: z.enum(flightIds),
           status: statusSchema,
           delayMinutes: z.number().int().min(1).max(1440).optional(),
@@ -175,7 +259,9 @@ export function createDemo(options: EventsOptions, store?: FlightStore) {
         },
       },
       async (input) => {
-        const parsed = changeSchema.safeParse(input);
+        const { tripId, ...change } = input;
+        assertTrip(tripId);
+        const parsed = changeSchema.safeParse(change);
         if (!parsed.success)
           return {
             isError: true,
@@ -204,7 +290,7 @@ export function createDemo(options: EventsOptions, store?: FlightStore) {
       await changed.terminate(
         new EventsError(
           "forbidden",
-          "Demo session expired. Create a new session to continue.",
+          "Demo trip expired. Call create_demo_trip to continue.",
         ),
       );
     },
