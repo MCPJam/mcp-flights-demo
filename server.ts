@@ -1,73 +1,67 @@
 import { createServer } from "node:http";
-import {
-  OAuthError,
-  OAuthErrorCode,
-  requireBearerAuth,
-} from "@modelcontextprotocol/server";
+import { randomBytes } from "node:crypto";
 import { nodeWebhookSender } from "@modelcontextprotocol/server/ext/events/node";
 import { toNodeHandler } from "@modelcontextprotocol/node";
-import { createDemo } from "./demo.js";
-import { getToken, port, receiverPort } from "./config.js";
-
-const token = getToken();
-const log = (action: string, details: object = {}) =>
-  console.log(
-    JSON.stringify({ at: new Date().toISOString(), action, ...details }),
-  );
-
-// All protocol, subscription, replay, signature and delivery logic is the official SDK.
-const demo = createDemo({
-  getPrincipal: (ctx) => {
-    const principal = ctx.http?.authInfo?.extra?.sub;
-    return typeof principal === "string" ? principal : null;
-  },
+import { createDemo, type DemoTrip } from "./demo.js";
+import {
+  newTrip,
+  readRpc,
+  verifySessionToken,
+  type DemoInstance,
+} from "./gateway.js";
+import { port, receiverPort } from "./config.js";
+const secret = randomBytes(48).toString("hex");
+const trips = new Map<string, { trip: DemoTrip; demo: DemoInstance }>();
+const options = {
+  getPrincipal: () => "anonymous-trip",
   webhookSender: nodeWebhookSender(),
-  webhookTtlMs: 60_000,
-  // Only the local smoke-test receiver bypasses the SDK's public HTTPS requirement.
+  webhookTtlMs: 60000,
   trustedOrigins: [`http://127.0.0.1:${receiverPort}`],
   checkIntervalMs: 250,
   defaultNextPollMs: 1000,
-});
-
-const gate = requireBearerAuth({
-  verifier: {
-    async verifyAccessToken(value) {
-      if (value !== token)
-        throw new OAuthError(OAuthErrorCode.InvalidToken, "Invalid demo token");
-      return {
-        token: value,
-        clientId: "mcpjam-demo",
-        scopes: [],
-        // Static demo credential; each successful verification authorizes the next hour.
-        expiresAt: Math.floor(Date.now() / 1000) + 3600,
-        extra: { sub: "demo-user" },
-      };
-    },
+};
+const catalog = createDemo(options, undefined, {
+  getTrip: () => undefined,
+  createTrip: async () => {
+    if (trips.size >= 100)
+      throw new Error(
+        "Local demo trip limit reached. Wait for expiry or restart.",
+      );
+    const trip = await newTrip(secret);
+    const demo = createDemo(options, undefined, { getTrip: () => trip });
+    trips.set(trip.tripId, { trip, demo });
+    return { ...trip, flight: await demo.getFlight("MJ204") };
   },
 });
-const handler = demo.handler;
-
+const cleanup = setInterval(() => {
+  for (const [id, { trip, demo }] of trips)
+    if (trip.expiresAt <= Date.now()) {
+      trips.delete(id);
+      void demo.stop().then(() => demo.handler.close());
+    }
+}, 1000);
+cleanup.unref();
 const mcp = toNodeHandler({
   async fetch(request) {
-    const authInfo = await gate(request);
-    if (authInfo instanceof Response) return authInfo;
-    // Log method names only, never request bodies, authorization headers or callback secrets.
-    const method = request.headers.get("mcp-method");
-    if (method && method !== "events/poll") log("rpc", { method });
-    return handler.fetch(request, { authInfo });
+    let inspected: Awaited<ReturnType<typeof readRpc>>;
+    try {
+      inspected = await readRpc(request);
+    } catch {
+      return new Response("Request too large", { status: 413 });
+    }
+    const { message } = inspected;
+    const id = message?.params?.arguments?.tripId;
+    const valid =
+      typeof id === "string" ? await verifySessionToken(secret, id) : null;
+    const entry = valid && typeof id === "string" ? trips.get(id) : undefined;
+    return (entry?.demo ?? catalog).handler.fetch(inspected.request);
   },
 });
 const http = createServer((req, res) => {
   const path = new URL(req.url ?? "/", "http://localhost").pathname;
   if (path === "/health") {
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(
-      JSON.stringify({
-        ok: true,
-        sdk: "official-events-PR-3209",
-        events: ["flight.status_changed"],
-      }),
-    );
+    res.end(JSON.stringify({ ok: true, authentication: "none" }));
     return;
   }
   if (path !== "/mcp") {
@@ -77,15 +71,24 @@ const http = createServer((req, res) => {
   }
   void mcp(req, res);
 });
-http.listen(port, "127.0.0.1", () => {
-  log("ready", {
-    url: `http://127.0.0.1:${port}/mcp`,
-    tokenFile: ".demo-token",
-  });
-});
+http.listen(port, "127.0.0.1", () =>
+  console.log(
+    JSON.stringify({
+      action: "ready",
+      url: `http://127.0.0.1:${port}/mcp`,
+      authentication: "none",
+    }),
+  ),
+);
 async function shutdown() {
-  await demo.stop();
-  await handler.close();
+  clearInterval(cleanup);
+  await Promise.all(
+    [...trips.values()].map(async ({ demo }) => {
+      await demo.stop();
+      await demo.handler.close();
+    }),
+  );
+  await catalog.handler.close();
   http.closeAllConnections();
   http.close();
 }

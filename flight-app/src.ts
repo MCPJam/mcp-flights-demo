@@ -1,7 +1,8 @@
 import { App } from "@modelcontextprotocol/ext-apps";
-const app = new App({ name: "MCPJam Flights", version: "1.0.0" }, {});
+const app = new App({ name: "MCPJam Flights", version: "1.1.0" }, {});
 const el = (id: string) => document.getElementById(id)!;
-let flightId: string | undefined,
+let tripId: string | undefined,
+  flightId: string | undefined,
   timer: ReturnType<typeof setTimeout> | undefined,
   stopped = false,
   busy = false;
@@ -16,10 +17,11 @@ const time = (iso: string | null, zone: string) =>
 function render(result: any) {
   if (result.isError)
     throw new Error(
-      "Flight status is unavailable. Your demo session may have expired.",
+      "Flight status is unavailable. Your demo trip may have expired.",
     );
   const f = result.structuredContent?.flight;
   if (!f) return;
+  tripId = result.structuredContent?.tripId;
   flightId = f.flightId;
   for (const key of ["origin", "originCity", "destination", "destinationCity"])
     el(key).textContent = f[key];
@@ -61,15 +63,18 @@ function render(result: any) {
   el("error").hidden = true;
 }
 async function refresh() {
-  if (busy || !flightId || stopped) return;
+  if (busy || !flightId || !tripId || stopped) return;
   busy = true;
   try {
     render(
-      await app.callServerTool({ name: "get_flight", arguments: { flightId } }),
+      await app.callServerTool({
+        name: "get_flight",
+        arguments: { tripId, flightId },
+      }),
     );
   } catch {
     el("error").textContent =
-      "Could not refresh. Check the server connection and session expiry.";
+      "Could not refresh. Check the server connection and trip expiry.";
     el("error").hidden = false;
   } finally {
     busy = false;
@@ -90,6 +95,7 @@ app.ontoolresult = (result) => {
   }
 };
 app.ontoolinput = ({ arguments: args }) => {
+  if (typeof args?.tripId === "string") tripId = args.tripId;
   if (typeof args?.flightId === "string") flightId = args.flightId;
 };
 app.onteardown = async () => {

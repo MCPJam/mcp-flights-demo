@@ -16,9 +16,6 @@ const deadline = setTimeout(() => {
   process.exit(1);
 }, 30_000);
 async function connect() {
-  const response = await fetch(new URL("/sessions", url), { method: "POST" });
-  assert.equal(response.status, 200);
-  const { token } = (await response.json()) as { token: string };
   const events = new EventsClientExtension();
   const client = new Client(
     { name: "isolation-test", version: "1" },
@@ -28,56 +25,69 @@ async function connect() {
     },
   );
   clients.push(client);
-  await client.connect(
-    new StreamableHTTPClientTransport(new URL(url), {
-      authProvider: { token: async () => token },
-    }),
-  );
-  return { client, events, token };
+  await client.connect(new StreamableHTTPClientTransport(new URL(url)));
+  const created = await client.callTool({
+    name: "create_demo_trip",
+    arguments: {},
+  });
+  assert.equal(created.isError, undefined);
+  const { tripId } = created.structuredContent as { tripId: string };
+  assert.ok(tripId);
+  return { client, events, tripId };
 }
 async function first(sub: EventSubscription) {
   for await (const event of sub) return event;
   throw new Error("No event");
 }
 try {
-  assert.equal((await fetch(url, { method: "POST" })).status, 401);
-  assert.equal(
-    (
-      await fetch(url, {
-        headers: {
-          Authorization: "Bearer forged",
-          "x-demo-expires-at": "9999999999999",
-        },
-      })
-    ).status,
-    401,
-  );
+  assert.notEqual((await fetch(url, { method: "POST" })).status, 401);
   const a = await connect();
   const b = await connect();
-  assert.notEqual(a.token, b.token);
+  assert.notEqual(a.tripId, b.tripId);
   const endpoint = new URL("/demo/flight", url);
-  assert.equal((await fetch(endpoint)).status, 401);
-  const headers = (token: string) => ({
-    Authorization: `Bearer ${token}`,
-    "Content-Type": "application/json",
+  assert.equal((await fetch(endpoint)).status, 410);
+  const forged = await a.client.callTool({
+    name: "get_flight",
+    arguments: { tripId: "forged", flightId: "MJ204" },
   });
-  const post = (token: string, data: unknown) =>
+  assert.equal(forged.isError, true);
+  const noTrip = await a.client.callTool({
+    name: "get_flight",
+    arguments: { flightId: "MJ204" },
+  });
+  assert.equal(noTrip.isError, true);
+  // An expired/tampered handle cannot select a Durable Object or cause an OAuth prompt.
+  const staleId = a.tripId.split(".");
+  staleId[1] = String(Date.now() - 1000);
+  const stale = await a.client.callTool({
+    name: "get_flight",
+    arguments: { tripId: staleId.join("."), flightId: "MJ204" },
+  });
+  assert.equal(stale.isError, true);
+  assert.equal(
+    (await a.client.listTools()).tools.some(
+      (t) => t.name === "create_demo_trip",
+    ),
+    true,
+  );
+  const headers = { "Content-Type": "application/json" };
+  const post = (tripId: string, data: Record<string, unknown>) =>
     fetch(endpoint, {
       method: "POST",
-      headers: headers(token),
-      body: JSON.stringify(data),
+      headers,
+      body: JSON.stringify({ tripId, ...data }),
     });
   for (const session of [a, b])
     subscriptions.push(
       await session.events.subscribe({
         name: "flight.status_changed",
         delivery: "poll",
-        arguments: { flightId: "MJ204" },
+        arguments: { tripId: session.tripId, flightId: "MJ204" },
       }),
     );
   assert.equal(
     (
-      await post(a.token, {
+      await post(a.tripId, {
         flightId: "MJ204",
         status: "delayed",
         delayMinutes: 0,
@@ -87,13 +97,13 @@ try {
   );
   const invalid = await fetch(endpoint, {
     method: "POST",
-    headers: headers(a.token),
+    headers,
     body: "{",
   });
   assert.equal(invalid.status, 400);
   assert.equal(
     (
-      await post(a.token, {
+      await post(a.tripId, {
         flightId: "MJ204",
         status: "delayed",
         delayMinutes: 45,
@@ -109,12 +119,12 @@ try {
     ).flight.delayMinutes,
     45,
   );
-  const bState = (await fetch(endpoint, { headers: headers(b.token) }).then(
-    (r) => r.json(),
-  )) as { flights: Array<{ status: string }> };
+  const bState = (await fetch(
+    new URL("?tripId=" + encodeURIComponent(b.tripId), endpoint),
+  ).then((r) => r.json())) as { flights: Array<{ status: string }> };
   assert.equal(bState.flights[0].status, "on_time");
   assert.equal(
-    (await post(b.token, { flightId: "MJ204", status: "cancelled" })).status,
+    (await post(b.tripId, { flightId: "MJ204", status: "cancelled" })).status,
     200,
   );
   assert.equal(
@@ -124,14 +134,14 @@ try {
   );
   const aState = await a.client.callTool({
     name: "get_flight",
-    arguments: { flightId: "MJ204" },
+    arguments: { tripId: a.tripId, flightId: "MJ204" },
   });
   assert.equal(
     (aState.structuredContent as { flight: { status: string } }).flight.status,
     "delayed",
   );
   console.log(
-    "PASS: auth rejection, invalid updates, isolated flight state, presenter REST → MCP Event → tool readback",
+    "PASS: anonymous connection/creation, invalid trip recovery, isolated trip state, presenter REST → MCP Event → tool readback",
   );
 } finally {
   await Promise.allSettled(subscriptions.map((sub) => sub.cancel()));
