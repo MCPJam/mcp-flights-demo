@@ -12,6 +12,8 @@ import {
   flightIds,
   flightSchema,
   initialFlights,
+  laterFlightFor,
+  localTimes,
   statusSchema,
   type Flight,
   type FlightStore,
@@ -35,6 +37,10 @@ const tripIdSchema = z
     "The tripId returned by create_demo_trip. Reuse it for every tool call and event subscription for this trip.",
   );
 const MIME = "text/html;profile=mcp-app";
+// The host, not the model, creates event subscriptions. Most hosts (MCPJam's
+// Playground included) give the model no tool for it, so say what to do instead.
+const ALERTS =
+  "For alerts, use an events-subscription tool only if you have one (event flight.status_changed with this tripId and flightId). Otherwise tell the user to connect flight.status_changed with this tripId in their host, e.g. MCPJam: Playground → Events → Connect event, and add their alert instruction there. Never say alerts or monitoring are set up unless a subscription was actually created.";
 export function createDemo(
   options: EventsOptions,
   store?: FlightStore,
@@ -113,7 +119,7 @@ export function createDemo(
         flight.status === "cancelled"
           ? `${flight.flightId} has been cancelled.`
           : flight.status === "delayed"
-            ? `${flight.flightId} is delayed by ${flight.delayMinutes} minutes. New departure: ${flight.estimatedDeparture}.`
+            ? `${flight.flightId} is delayed by ${flight.delayMinutes} minutes. New departure: ${localTimes(flight).estimatedDeparture}.`
             : `${flight.flightId} is back on time.`;
       await changed.emit({
         eventId,
@@ -126,6 +132,31 @@ export function createDemo(
         },
       });
       return { ...tripData(), flight, emitted: true, eventId };
+    });
+    queue = result.catch(() => {});
+    return result;
+  }
+  function rebook(flightId: string) {
+    const result = queue.then(async () => {
+      const original = await getFlight(flightId);
+      if (original.status === "on_time")
+        throw new Error(
+          `${flightId} is on time. Rebooking is only for delayed or cancelled flights.`,
+        );
+      const candidate = laterFlightFor(original);
+      const booked = flights.find((f) => f.flightId === candidate.flightId);
+      if (!booked) {
+        const next = [...flights, candidate];
+        await store?.save(next);
+        flights = next;
+      }
+      const flight = structuredClone(booked ?? candidate);
+      return {
+        ...tripData(),
+        rebookedFrom: flightId,
+        flight,
+        localTimes: localTimes(flight),
+      };
     });
     queue = result.catch(() => {});
     return result;
@@ -143,7 +174,7 @@ export function createDemo(
       {
         title: "Create a demo trip",
         description:
-          "Start here when the user asks to watch a flight and has no tripId yet. Creates an isolated fictional trip, valid for 30 minutes, without login or credentials. Reuse the returned tripId in get_flight, simulate_flight_update and flight.status_changed subscription arguments. Then use your host's Events tools to subscribe and arrange alerts; creating a trip alone does not start monitoring. Do not create another trip if a valid tripId is already available.",
+          `Start here when the user asks about their flight and has no tripId yet. Creates an isolated fictional trip, valid for 30 minutes, without login or credentials, and already shows its flight card (MCP App), so don't call get_flight afterwards for the same flight. Reuse the returned tripId for later tool calls and event subscriptions. Do not create another trip if a valid tripId is already available. Creating a trip does not start monitoring. ${ALERTS}`,
         inputSchema: z.object({}),
         annotations: {
           readOnlyHint: false,
@@ -166,12 +197,12 @@ export function createDemo(
         const trip = await context.createTrip();
         const data = {
           ...trip,
+          localTimes: localTimes(trip.flight),
           subscription: {
             name: "flight.status_changed",
             arguments: { tripId: trip.tripId, flightId: trip.flight.flightId },
           },
-          monitoring:
-            "Not started. Subscribe with your host's Events tools and enable the user's alert instruction.",
+          monitoring: `Not started. ${ALERTS}`,
         };
         return {
           content: [{ type: "text", text: JSON.stringify(data) }],
@@ -202,7 +233,7 @@ export function createDemo(
       {
         title: "View flight status",
         description:
-          "Show the live MCP App trip card for a fictional flight. This reads status; it does NOT subscribe or promise alerts. To watch it, the HOST must subscribe to flight.status_changed with this tripId and flightId and arrange agent execution. Use the user's standing instruction as the trigger, e.g. 'Let me know if my flight is cancelled or delayed.'",
+          `Show the MCP App flight card with a fictional flight's current status, e.g. after an event or when the user asks again. create_demo_trip and rebook_flight already show the card, so don't call this right after them for the same flight. Reading status does not subscribe. ${ALERTS}`,
         inputSchema: z.object({
           tripId: tripIdSchema,
           flightId: z.enum(flightIds),
@@ -212,7 +243,8 @@ export function createDemo(
       },
       async ({ tripId, flightId }) => {
         assertTrip(tripId);
-        const data = { ...tripData(), flight: await getFlight(flightId) };
+        const flight = await getFlight(flightId);
+        const data = { ...tripData(), flight, localTimes: localTimes(flight) };
         return {
           content: [{ type: "text", text: JSON.stringify(data) }],
           structuredContent: data,
@@ -279,6 +311,45 @@ export function createDemo(
         };
       },
     );
+    server.registerTool(
+      "rebook_flight",
+      {
+        title: "Rebook a flight",
+        description:
+          "Move the traveler from a delayed or cancelled flight to the later MCPJam Airways flight on the same route, which departs two hours after the original schedule, and show the new flight's card (MCP App), so don't call get_flight afterwards. Fictional: no payment or real reservation. Only call it when the user asked to be rebooked.",
+        inputSchema: z.object({
+          tripId: tripIdSchema,
+          flightId: z.enum(flightIds),
+        }),
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          openWorldHint: false,
+        },
+        _meta: { ui: { resourceUri: APP_URI }, "ui/resourceUri": APP_URI },
+      },
+      async ({ tripId, flightId }) => {
+        assertTrip(tripId);
+        try {
+          const data = await rebook(flightId);
+          return {
+            content: [{ type: "text", text: JSON.stringify(data) }],
+            structuredContent: data,
+          };
+        } catch (error) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text:
+                  error instanceof Error ? error.message : "Could not rebook.",
+              },
+            ],
+          };
+        }
+      },
+    );
     return server;
   }
   return {
@@ -286,6 +357,7 @@ export function createDemo(
     listFlights,
     getFlight,
     simulate,
+    rebook,
     async stop() {
       await changed.terminate(
         new EventsError(

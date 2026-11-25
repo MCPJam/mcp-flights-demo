@@ -9,13 +9,13 @@ A shareable travel-plugin demo with fictional flights, real MCP Events, and an i
 ## Demo in 60 seconds
 
 1. In MCPJam, add the HTTP server **`https://flights.mcpjam.com/mcp`** with **Authentication: None**. No website visit, account, or custom header is needed.
-2. Ask **“Create a demo trip and let me know if my flight is cancelled or delayed.”** The agent calls `create_demo_trip`, gets a temporary `tripId`, and uses MCPJam's Events tools to subscribe to `flight.status_changed` and arrange the alert.
+2. Ask **“Create a demo trip and let me know if my flight is cancelled or delayed.”** The agent calls `create_demo_trip`, which shows the flight card and returns a temporary `tripId`. MCPJam gives the agent no tool to subscribe, so it tells you to connect the event: in the Playground, open **Events → Connect event**, choose `flight.status_changed`, enter the `tripId` and `MJ204`, and add your instruction.
 3. Ask **“Simulate a 45-minute delay for my trip.”** The agent calls `simulate_flight_update` using the same `tripId`. Check the event and agent response in MCPJam. Try cancellation next.
 4. The MCP App displays the flight card and refreshes its status. For repeatable presentation controls, optionally open the demo website, expand **Presenter controls**, paste the agent's trip ID, and load it. Creating a different trip on the website will not update the agent's trip.
 
-For manual setup, call `create_demo_trip`, subscribe in **Events** using its returned `subscription.arguments`, and enable a trigger: **“Let me know if MJ204 is cancelled or delayed. Include the new departure time for delays. Do not simulate changes or rebook.”** Choose a delivery mode supported by the selected host.
+When connecting the event, use the `subscription.arguments` returned by `create_demo_trip` and an instruction such as **“Let me know if MJ204 is cancelled or delayed. Include the new departure time for delays. Do not simulate changes or rebook.”** Choose a delivery mode supported by the selected host.
 
-Trips contain fictional data and expire after 30 minutes. The host creates subscriptions and runs the agent; creating or reading a trip does not start monitoring. Hosts without conversational subscription/trigger tools need manual setup. Successful publication, receipt by the host, and an agent reply are separate observations. No real flights, reservations, purchases, or rebooking are involved.
+Trips contain fictional data and expire after 30 minutes. The host creates subscriptions and runs the agent; creating or reading a trip does not start monitoring. Hosts without conversational subscription/trigger tools, including MCPJam's Playground, need this manual setup. Successful publication, receipt by the host, and an agent reply are separate observations. No real flights, reservations, purchases, or rebookings are involved: `rebook_flight` only moves the fictional trip to a later fictional flight.
 
 ## What the plugin exposes
 
@@ -25,6 +25,7 @@ Trips contain fictional data and expire after 30 minutes. The host creates subsc
 | `list_flights` tool                      | Find the fictional flights in this trip: MJ204 (SFO → JFK), MJ318 (LAX → SEA)                          |
 | `get_flight` tool                        | Read current status and render the MCP App                                                             |
 | `simulate_flight_update` tool            | Presenter/test-only tool; must not be used to fulfill a monitoring request                             |
+| `rebook_flight` tool                     | Move a delayed or cancelled flight to the later flight on the same route (MJ204 → MJ208), shown in the MCP App |
 | `flight.status_changed` event            | Deliver status changes for one selected flight                                                         |
 | `ui://mcpjam-flights/trip.html` resource | Bundled MCP App using the official Apps SDK                                                            |
 

@@ -1,6 +1,8 @@
 import * as z from "zod/v4";
 
-export const flightIds = ["MJ204", "MJ318"] as const;
+export const flightIds = ["MJ204", "MJ318", "MJ208", "MJ322"] as const;
+// rebook_flight moves a traveler to the later flight on the same route.
+export const laterFlight = { MJ204: "MJ208", MJ318: "MJ322" } as const;
 export const statusSchema = z.enum(["on_time", "delayed", "cancelled"]);
 export const changeSchema = z.discriminatedUnion("status", [
   z
@@ -46,7 +48,7 @@ export function initialFlights(now = Date.now()): Flight[] {
   const day = new Date(now);
   day.setUTCDate(day.getUTCDate() + 1);
   day.setUTCHours(16, 0, 0, 0);
-  return flightIds.map((flightId, i) => {
+  return (["MJ204", "MJ318"] as const).map((flightId, i) => {
     const departure = new Date(day.getTime() + i * 3600000).toISOString();
     const arrival = new Date(
       day.getTime() + (i ? 3.5 : 5.5) * 3600000,
@@ -96,5 +98,47 @@ export function applyChange(
         : new Date(
             Date.parse(previous.scheduledArrival) + delayMinutes * 60000,
           ).toISOString(),
+  };
+}
+export function laterFlightFor(original: Flight, now = Date.now()): Flight {
+  const flightId =
+    laterFlight[original.flightId as keyof typeof laterFlight];
+  if (!flightId) throw new Error(`${original.flightId} has no later flight.`);
+  const later = (iso: string) =>
+    new Date(Date.parse(iso) + 2 * 3600000).toISOString();
+  const departure = later(original.scheduledDeparture);
+  const arrival = later(original.scheduledArrival);
+  return {
+    ...original,
+    flightId,
+    scheduledDeparture: departure,
+    scheduledArrival: arrival,
+    estimatedDeparture: departure,
+    estimatedArrival: arrival,
+    status: "on_time",
+    delayMinutes: 0,
+    revision: 0,
+    updatedAt: new Date(now).toISOString(),
+  };
+}
+// Airport-local times for the model: ISO UTC alone led agents to report 16:00Z as 4 PM Pacific.
+export function localTimes(flight: Flight) {
+  const at = (iso: string | null, timeZone: string) =>
+    iso
+      ? new Intl.DateTimeFormat("en-US", {
+          weekday: "short",
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+          timeZone,
+          timeZoneName: "short",
+        }).format(new Date(iso))
+      : null;
+  return {
+    scheduledDeparture: at(flight.scheduledDeparture, flight.originTimeZone),
+    estimatedDeparture: at(flight.estimatedDeparture, flight.originTimeZone),
+    scheduledArrival: at(flight.scheduledArrival, flight.destinationTimeZone),
+    estimatedArrival: at(flight.estimatedArrival, flight.destinationTimeZone),
   };
 }

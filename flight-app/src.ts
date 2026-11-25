@@ -1,3 +1,4 @@
+import "./zod-jitless.js"; // must stay first: see the file
 import { App } from "@modelcontextprotocol/ext-apps";
 const app = new App({ name: "MCPJam Flights", version: "1.1.0" }, {});
 const el = (id: string) => document.getElementById(id)!;

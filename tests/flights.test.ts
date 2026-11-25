@@ -4,6 +4,7 @@ import { createDemo } from "../demo.ts";
 import {
   initialFlights,
   applyChange,
+  localTimes,
   changeSchema,
   type Flight,
 } from "../flights.ts";
@@ -76,4 +77,31 @@ test("flight state survives server reconstruction and concurrent changes seriali
     await demo.stop();
     await demo.handler.close();
   }
+});
+test("rebooking needs a delay or cancellation and moves to the later flight once", async () => {
+  const demo = createDemo({ getPrincipal: () => "test" });
+  try {
+    await assert.rejects(demo.rebook("MJ204"), /on time/);
+    await demo.simulate({ flightId: "MJ204", status: "delayed", delayMinutes: 180 });
+    const first = await demo.rebook("MJ204");
+    const original = await demo.getFlight("MJ204");
+    assert.equal(first.flight.flightId, "MJ208");
+    assert.equal(first.flight.status, "on_time");
+    assert.equal(
+      Date.parse(first.flight.scheduledDeparture) -
+        Date.parse(original.scheduledDeparture),
+      2 * 3600000,
+    );
+    assert.deepEqual((await demo.rebook("MJ204")).flight, first.flight);
+    assert.equal((await demo.listFlights()).length, 3);
+    await assert.rejects(demo.rebook("MJ208"), /on time/);
+  } finally {
+    await demo.stop();
+    await demo.handler.close();
+  }
+});
+test("local times name the airport's own zone", () => {
+  const times = localTimes(initialFlights(1795000000000)[0]);
+  assert.match(times.scheduledDeparture!, /^Thu, Nov 19, 8:00\sAM PST$/);
+  assert.match(times.scheduledArrival!, /^Thu, Nov 19, 4:30\sPM EST$/);
 });
