@@ -10,6 +10,7 @@ import {
   type DemoInstance,
 } from "./gateway.js";
 import { port, receiverPort } from "./config.js";
+import { eventsCompat } from "./compat.js";
 const secret = randomBytes(48).toString("hex");
 const trips = new Map<string, { trip: DemoTrip; demo: DemoInstance }>();
 const options = {
@@ -50,11 +51,15 @@ const mcp = toNodeHandler({
       return new Response("Request too large", { status: 413 });
     }
     const { message } = inspected;
+    // Serve Beta clients and design-sketch clients (ChatGPT) from one server; see compat.ts.
+    const compat = eventsCompat(inspected.request, message);
     const id = message?.params?.arguments?.tripId;
     const valid =
       typeof id === "string" ? await verifySessionToken(secret, id) : null;
     const entry = valid && typeof id === "string" ? trips.get(id) : undefined;
-    return (entry?.demo ?? catalog).handler.fetch(inspected.request);
+    return compat.finish(
+      await (entry?.demo ?? catalog).handler.fetch(compat.request),
+    );
   },
 });
 const http = createServer((req, res) => {

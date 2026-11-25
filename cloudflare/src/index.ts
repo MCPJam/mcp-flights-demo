@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   EventsError,
+  type WebhookSender,
   type WebhookSubscriptionRecord,
   type WebhookSubscriptionStore,
 } from "@modelcontextprotocol/server/ext/events";
@@ -12,6 +13,7 @@ import {
   TRIP_ERROR,
 } from "../../gateway";
 import { cloudflareWebhookSender } from "./webhook-sender";
+import { describeRpc, eventsCompat, summarizeReply } from "../../compat";
 import { landing } from "./landing";
 import type { Flight } from "../../flights";
 import { changeSchema } from "../../flights";
@@ -21,6 +23,29 @@ interface Env {
   SESSION_LIMIT: RateLimit;
   REQUEST_LIMIT: RateLimit;
   DEMO_SESSION_SECRET: string;
+  // "1" logs Events handshakes, events/* calls and webhook outcomes, with nothing secret in them.
+  RPC_LOG?: string;
+}
+
+// With RPC_LOG, report each webhook POST's kind and outcome (never its body or callback path).
+function webhookSender(env: Env): WebhookSender {
+  if (env.RPC_LOG !== "1") return cloudflareWebhookSender;
+  return async (request) => {
+    const outcome = await cloudflareWebhookSender(request);
+    let kind = "event";
+    try {
+      kind = (JSON.parse(request.body) as { type?: string }).type ?? "event";
+    } catch {}
+    console.log(
+      JSON.stringify({
+        webhook: kind,
+        callback: new URL(request.url).origin,
+        ...outcome,
+        body: undefined,
+      }),
+    );
+    return outcome;
+  };
 }
 
 class SubscriptionStore implements WebhookSubscriptionStore {
@@ -62,7 +87,7 @@ export class EventsDemoSession extends DurableObject<Env> {
     this.demo = createDemo(
       {
         getPrincipal: () => ctx.id.toString(),
-        webhookSender: cloudflareWebhookSender,
+        webhookSender: webhookSender(env),
         webhookStore: new SubscriptionStore(ctx.storage),
         webhookTtlMs: 60_000,
         maxSubscriptions: 128,
@@ -211,7 +236,28 @@ export default {
       return cors(new Response("Request too large", { status: 413 }));
     }
     const { message } = inspected;
-    request = inspected.request;
+    // Serve Beta clients and design-sketch clients (ChatGPT) from one server; see compat.ts.
+    const compat = eventsCompat(inspected.request, message);
+    request = compat.request;
+    const logged =
+      env.RPC_LOG === "1" &&
+      (message?.method === "initialize" ||
+        message?.method === "server/discover" ||
+        message?.method?.startsWith("events/"));
+    if (logged)
+      console.log(JSON.stringify(describeRpc(message, compat.legacyEvents)));
+    const finish = async (response: Response) => {
+      const out = await compat.finish(response);
+      if (logged && message?.method !== "events/stream")
+        console.log(
+          JSON.stringify({
+            rpc: message?.method,
+            status: out.status,
+            reply: summarizeReply(await out.clone().text()),
+          }),
+        );
+      return cors(out);
+    };
     const isCreation =
       url.pathname === "/trips" ||
       (message?.method === "tools/call" &&
@@ -265,7 +311,7 @@ export default {
         ? await verifySessionToken(env.DEMO_SESSION_SECRET, tripId)
         : null;
     if (trip && typeof tripId === "string")
-      return cors(
+      return finish(
         await routeTrip(request, env, { tripId, expiresAt: trip.expiresAt }),
       );
     // Public discovery, catalog, App resources and trip creation need no credentials.
@@ -273,14 +319,14 @@ export default {
     const catalog = createDemo(
       {
         getPrincipal: () => "catalog",
-        webhookSender: cloudflareWebhookSender,
+        webhookSender: webhookSender(env),
         webhookTtlMs: 60000,
       },
       undefined,
       { getTrip: () => undefined, createTrip },
     );
     try {
-      return cors(await catalog.handler.fetch(request));
+      return finish(await catalog.handler.fetch(request));
     } finally {
       await catalog.handler.close();
     }

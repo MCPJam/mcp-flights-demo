@@ -64,7 +64,9 @@ For `cancelled` or `on_time`, omit `delayMinutes`.
 
 ## SDK provenance
 
-The official TypeScript SDK is a git submodule pinned to `5ebb589b970bfc8f98e344e13299f8eb76ff8cd1` from [`feature/ext-events-sep-3415`, PR #3209](https://github.com/modelcontextprotocol/typescript-sdk/pull/3209). This is experimental Events support, **not a stable npm Events release**. The server uses MCP `2026-07-28` and `capabilities.extensions["io.modelcontextprotocol/events"]`; it does not emulate the older top-level `capabilities.events` draft.
+The official TypeScript SDK is a git submodule pinned to `5ebb589b970bfc8f98e344e13299f8eb76ff8cd1` from [`feature/ext-events-sep-3415`, PR #3209](https://github.com/modelcontextprotocol/typescript-sdk/pull/3209). This is experimental Events support, **not a stable npm Events release**. The SDK serves the Beta extension: MCP `2026-07-28` and `capabilities.extensions["io.modelcontextprotocol/events"]` on `server/discover`.
+
+**Clients built on the Events design sketch, such as ChatGPT, work too.** They look for a top-level `capabilities.events` and may call `events/*` inside an `initialize` (2025-era) session ([OpenAI: MCP Events](https://developers.openai.com/plugins/build/mcp-events)). `compat.ts` advertises both capability shapes. It also passes a 2025-era `events/list`, `events/subscribe` or `events/unsubscribe` to the SDK in its 2026-07-28 form. Those three methods have the same params and results in both documents, and the SDK still validates and runs every request. Set `RPC_LOG=1` on a Worker to log handshakes, `events/*` calls and webhook outcomes, with secrets, callback paths and trip handles left out.
 
 The SDK handles discovery, subscriptions, poll/push/webhook delivery, callback verification, signatures, leases, and retries. The UI uses published `@modelcontextprotocol/ext-apps` (exact version in `flight-app/package-lock.json`). The gateway reads the trip ID from RPC arguments to select its Durable Object; the official SDK validates and executes the original request. No application code reimplements either wire protocol.
 
